@@ -21,6 +21,7 @@ import maya.api.OpenMaya as om
 
 
 WINDOW_NAME = "gvhmrMayaImporterWindow"
+SMPLX_JOINT_RADIUS = 0.05
 
 
 CAMERA_X_FLIP_MATRIX = [
@@ -232,6 +233,7 @@ def _import_smplx_rig(bundle_dir, files, replace_existing=True):
     for name in joint_names:
         joint = cmds.createNode("joint", name=f"GVHMR_{name}_JNT")
         cmds.setAttr(f"{joint}.rotateOrder", 0)
+        cmds.setAttr(f"{joint}.radius", SMPLX_JOINT_RADIUS)
         joints.append(joint)
 
     for index, joint in enumerate(joints):
