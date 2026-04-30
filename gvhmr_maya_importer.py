@@ -280,7 +280,9 @@ def _create_camera(camera_data, replace_existing=True, flip_x=True):
         frame = item["frame"]
         matrix = item["matrix"]
         if flip_x:
-            matrix = _matmul4(matrix, CAMERA_X_FLIP_MATRIX)
+            # Pre-multiply for Maya's row-major transform list so the camera
+            # orientation flips while the world-space translation stays put.
+            matrix = _matmul4(CAMERA_X_FLIP_MATRIX, matrix)
         focal = item.get("focal_length_mm")
 
         cmds.currentTime(frame, edit=True)
