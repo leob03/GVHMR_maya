@@ -71,6 +71,14 @@ def _try_load_plugin(name):
         return False
 
 
+def _safe_set_attr(attr, value):
+    try:
+        if cmds.objExists(attr):
+            cmds.setAttr(attr, value)
+    except Exception:
+        pass
+
+
 def _set_time_unit(fps):
     fps_int = int(round(float(fps)))
     time_units = {
@@ -253,7 +261,53 @@ def _delete_existing_camera(camera_name):
             pass
 
 
-def _create_camera(camera_data, replace_existing=True, flip_x=True):
+def _reference_media_path(bundle_dir, files):
+    value = files.get("reference_video", "") or files.get("reference_image", "")
+    if value:
+        path = _resolve_bundle_file(bundle_dir, value)
+        if os.path.isfile(path):
+            return path
+
+    smpc_path = _resolve_bundle_file(bundle_dir, files.get("smpc_bin", ""))
+    if smpc_path:
+        base, _ = os.path.splitext(smpc_path)
+        for ext in (".mp4", ".mov", ".png", ".jpg", ".jpeg"):
+            candidate = f"{base}_ref{ext}"
+            if os.path.isfile(candidate):
+                return candidate
+    return ""
+
+
+def _create_camera_reference_plane(camera_transform, camera_shape, media_path):
+    if not media_path:
+        return ""
+
+    try:
+        result = cmds.imagePlane(camera=camera_transform, fileName=media_path)
+    except Exception as exc:
+        cmds.warning(f"Could not create camera image plane from {media_path}: {exc}")
+        return ""
+
+    plane_shape = ""
+    if isinstance(result, (list, tuple)) and result:
+        plane_shape = result[-1]
+    elif isinstance(result, str):
+        plane_shape = result
+
+    _safe_set_attr(f"{camera_shape}.displayResolution", 1)
+    _safe_set_attr(f"{camera_shape}.displayFilmGate", 1)
+    _safe_set_attr(f"{camera_shape}.displayGateMask", 1)
+    _safe_set_attr(f"{camera_shape}.displayGateMaskOpacity", 0.5)
+    _safe_set_attr(f"{camera_shape}.overscan", 1.0)
+
+    if plane_shape:
+        _safe_set_attr(f"{plane_shape}.displayMode", 3)
+        _safe_set_attr(f"{plane_shape}.alphaGain", 0.7)
+
+    return plane_shape
+
+
+def _create_camera(camera_data, replace_existing=True, flip_x=True, reference_media_path=""):
     camera_name = camera_data.get("camera_name", "GVHMR_Camera")
     if replace_existing:
         _delete_existing_camera(camera_name)
@@ -281,6 +335,10 @@ def _create_camera(camera_data, replace_existing=True, flip_x=True):
     cmds.setAttr(f"{shape}.filmFit", 1)  # horizontal
     cmds.setAttr(f"{shape}.lensSqueezeRatio", 1.0)
     cmds.setAttr(f"{shape}.cameraScale", 1.0)
+    _safe_set_attr(f"{shape}.displayResolution", 1)
+    _safe_set_attr(f"{shape}.displayFilmGate", 1)
+    _safe_set_attr(f"{shape}.displayGateMask", 1)
+    _safe_set_attr(f"{shape}.overscan", 1.0)
 
     for item in frames:
         frame = item["frame"]
@@ -302,10 +360,21 @@ def _create_camera(camera_data, replace_existing=True, flip_x=True):
     if frames:
         cmds.currentTime(frames[0]["frame"], edit=True)
 
+    if reference_media_path:
+        _create_camera_reference_plane(transform, shape, reference_media_path)
+
     return transform
 
 
-def import_bundle(bundle_dir, import_body=True, import_smpc_mesh=False, import_camera=True, replace_camera=True, flip_camera_x=True):
+def import_bundle(
+    bundle_dir,
+    import_body=True,
+    import_smpc_mesh=False,
+    import_camera=True,
+    replace_camera=True,
+    flip_camera_x=True,
+    create_reference_plane=True,
+):
     bundle_dir = os.path.abspath(bundle_dir)
     manifest_file = _manifest_path(bundle_dir)
     if not os.path.isfile(manifest_file):
@@ -329,7 +398,13 @@ def import_bundle(bundle_dir, import_body=True, import_smpc_mesh=False, import_c
         if not os.path.isfile(camera_json):
             raise RuntimeError(f"Maya camera JSON not found: {camera_json}")
         camera_data = _load_json(camera_json)
-        camera_name = _create_camera(camera_data, replace_existing=replace_camera, flip_x=flip_camera_x)
+        reference_media = _reference_media_path(bundle_dir, files) if create_reference_plane else ""
+        camera_name = _create_camera(
+            camera_data,
+            replace_existing=replace_camera,
+            flip_x=flip_camera_x,
+            reference_media_path=reference_media,
+        )
 
     return {
         "bundle_dir": bundle_dir,
@@ -352,6 +427,7 @@ def _run_import(*_):
     import_camera_value = cmds.checkBox("gvhmrImportCameraCheck", query=True, value=True)
     replace_camera_value = cmds.checkBox("gvhmrReplaceCameraCheck", query=True, value=True)
     flip_camera_x_value = cmds.checkBox("gvhmrFlipCameraXCheck", query=True, value=True)
+    create_reference_plane_value = cmds.checkBox("gvhmrReferencePlaneCheck", query=True, value=True)
 
     try:
         result = import_bundle(
@@ -361,6 +437,7 @@ def _run_import(*_):
             import_camera=import_camera_value,
             replace_camera=replace_camera_value,
             flip_camera_x=flip_camera_x_value,
+            create_reference_plane=create_reference_plane_value,
         )
         message = "GVHMR import complete"
         if result.get("camera"):
@@ -397,6 +474,7 @@ def show():
     cmds.checkBox("gvhmrImportCameraCheck", label="Create animated camera", value=True)
     cmds.checkBox("gvhmrReplaceCameraCheck", label="Replace existing GVHMR camera", value=True)
     cmds.checkBox("gvhmrFlipCameraXCheck", label="Flip camera 180 degrees around X", value=True)
+    cmds.checkBox("gvhmrReferencePlaneCheck", label="Attach reference video/image plane", value=True)
 
     cmds.separator(height=8, style="in")
     cmds.button(label="Import GVHMR Bundle", height=34, command=_run_import)
