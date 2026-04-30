@@ -13,8 +13,11 @@ Run in Maya's Script Editor:
 
 import json
 import os
+import struct
+from array import array
 
 import maya.cmds as cmds
+import maya.api.OpenMaya as om
 
 
 WINDOW_NAME = "gvhmrMayaImporterWindow"
@@ -35,6 +38,12 @@ def _resolve_bundle_file(bundle_dir, value):
 def _load_json(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _read_array(file_obj, typecode, count):
+    data = array(typecode)
+    data.frombytes(file_obj.read(count * data.itemsize))
+    return data
 
 
 def _try_load_plugin(name):
@@ -96,6 +105,109 @@ def _import_body(bundle_dir, files):
     return ""
 
 
+def _convert_smpc_point(x, y, z):
+    # SMPC vertices are in GVHMR/SMPL Y-up world space. Maya is also Y-up.
+    return om.MPoint(float(x), float(y), float(z))
+
+
+def _create_mesh_from_frame(mesh_name, vertices, faces, frame_index, num_verts, num_faces):
+    offset = frame_index * num_verts * 3
+    points = [
+        _convert_smpc_point(vertices[offset + i * 3], vertices[offset + i * 3 + 1], vertices[offset + i * 3 + 2])
+        for i in range(num_verts)
+    ]
+    face_counts = [3] * num_faces
+    face_connects = [int(v) for v in faces]
+    mesh_fn = om.MFnMesh()
+    mesh_obj = mesh_fn.create(points, face_counts, face_connects)
+    transform = om.MFnDagNode(mesh_obj).parent(0)
+    transform_name = om.MFnDagNode(transform).fullPathName()
+    return cmds.rename(transform_name, mesh_name)
+
+
+def _load_smpc_mesh_data(path):
+    with open(path, "rb") as f:
+        magic = f.read(4)
+        if magic != b"SMPC":
+            raise RuntimeError(f"Not an SMPC file: {path}")
+
+        num_frames = struct.unpack("<I", f.read(4))[0]
+        num_verts = struct.unpack("<I", f.read(4))[0]
+        num_faces = struct.unpack("<I", f.read(4))[0]
+        fps = struct.unpack("<f", f.read(4))[0]
+        f.read(64)
+        has_camera = struct.unpack("<I", f.read(4))[0]
+        img_w = struct.unpack("<I", f.read(4))[0]
+        img_h = struct.unpack("<I", f.read(4))[0]
+        vertices = _read_array(f, "f", num_frames * num_verts * 3)
+        faces = _read_array(f, "I", num_faces * 3)
+
+    return {
+        "num_frames": num_frames,
+        "num_verts": num_verts,
+        "num_faces": num_faces,
+        "fps": fps,
+        "has_camera": has_camera,
+        "img_width": img_w,
+        "img_height": img_h,
+        "vertices": vertices,
+        "faces": faces,
+    }
+
+
+def _import_smpc_mesh(bundle_dir, files, replace_existing=True, max_frames=240):
+    smpc_path = _resolve_bundle_file(bundle_dir, files.get("smpc_bin", ""))
+    if not smpc_path or not os.path.isfile(smpc_path):
+        cmds.warning("No SMPC mesh cache found in bundle.")
+        return ""
+
+    data = _load_smpc_mesh_data(smpc_path)
+    num_frames = int(data["num_frames"])
+    num_verts = int(data["num_verts"])
+    num_faces = int(data["num_faces"])
+
+    if num_frames > max_frames:
+        raise RuntimeError(
+            f"SMPC mesh cache has {num_frames} frames. "
+            f"This diagnostic importer is capped at {max_frames} frames."
+        )
+
+    mesh_name = "GVHMR_SMPL_Mesh"
+    target_group = "GVHMR_SMPL_Targets"
+    if replace_existing:
+        for name in (mesh_name, target_group):
+            if cmds.objExists(name):
+                cmds.delete(name)
+
+    base_mesh = _create_mesh_from_frame(mesh_name, data["vertices"], data["faces"], 0, num_verts, num_faces)
+    targets = []
+    if not cmds.objExists(target_group):
+        target_group = cmds.group(empty=True, name=target_group)
+
+    for frame_index in range(num_frames):
+        target_name = f"GVHMR_SMPL_Frame_{frame_index + 1:04d}"
+        target = _create_mesh_from_frame(target_name, data["vertices"], data["faces"], frame_index, num_verts, num_faces)
+        cmds.parent(target, target_group)
+        targets.append(target)
+
+    blendshape = cmds.blendShape(*(targets + [base_mesh]), name="GVHMR_SMPL_BlendShape")[0]
+    cmds.setAttr(f"{target_group}.visibility", 0)
+
+    _set_time_unit(data["fps"] or 24)
+    cmds.playbackOptions(min=1, max=num_frames)
+
+    for idx in range(num_frames):
+        attr = f"{blendshape}.w[{idx}]"
+        frame = idx + 1
+        for key_frame, value in ((max(1, frame - 1), 0.0), (frame, 1.0), (min(num_frames, frame + 1), 0.0)):
+            cmds.setAttr(attr, value)
+            cmds.setKeyframe(attr, time=key_frame)
+
+    cmds.currentTime(1, edit=True)
+    cmds.select(base_mesh, replace=True)
+    return base_mesh
+
+
 def _delete_existing_camera(camera_name):
     if cmds.objExists(camera_name):
         try:
@@ -146,7 +258,7 @@ def _create_camera(camera_data, replace_existing=True):
     return transform
 
 
-def import_bundle(bundle_dir, import_body=True, import_camera=True, replace_camera=True):
+def import_bundle(bundle_dir, import_body=True, import_smpc_mesh=False, import_camera=True, replace_camera=True):
     bundle_dir = os.path.abspath(bundle_dir)
     manifest_file = _manifest_path(bundle_dir)
     if not os.path.isfile(manifest_file):
@@ -156,10 +268,14 @@ def import_bundle(bundle_dir, import_body=True, import_camera=True, replace_came
     files = manifest.get("files", {})
 
     imported_body = ""
+    imported_mesh = ""
     camera_name = ""
 
     if import_body:
         imported_body = _import_body(bundle_dir, files)
+
+    if import_smpc_mesh:
+        imported_mesh = _import_smpc_mesh(bundle_dir, files, replace_existing=True)
 
     if import_camera:
         camera_json = _resolve_bundle_file(bundle_dir, files.get("maya_camera_json", "camera_maya.json"))
@@ -171,6 +287,7 @@ def import_bundle(bundle_dir, import_body=True, import_camera=True, replace_came
     return {
         "bundle_dir": bundle_dir,
         "body_path": imported_body,
+        "mesh": imported_mesh,
         "camera": camera_name,
     }
 
@@ -184,6 +301,7 @@ def _choose_bundle(*_):
 def _run_import(*_):
     bundle_dir = cmds.textFieldButtonGrp("gvhmrBundleField", query=True, text=True)
     import_body_value = cmds.checkBox("gvhmrImportBodyCheck", query=True, value=True)
+    import_smpc_mesh_value = cmds.checkBox("gvhmrImportSMPCMeshCheck", query=True, value=True)
     import_camera_value = cmds.checkBox("gvhmrImportCameraCheck", query=True, value=True)
     replace_camera_value = cmds.checkBox("gvhmrReplaceCameraCheck", query=True, value=True)
 
@@ -191,6 +309,7 @@ def _run_import(*_):
         result = import_bundle(
             bundle_dir,
             import_body=import_body_value,
+            import_smpc_mesh=import_smpc_mesh_value,
             import_camera=import_camera_value,
             replace_camera=replace_camera_value,
         )
@@ -199,6 +318,8 @@ def _run_import(*_):
             message += f"\nCamera: {result['camera']}"
         if result.get("body_path"):
             message += f"\nBody: {os.path.basename(result['body_path'])}"
+        if result.get("mesh"):
+            message += f"\nSMPC Mesh: {result['mesh']}"
         cmds.confirmDialog(title="GVHMR", message=message, button=["OK"])
     except Exception as exc:
         cmds.confirmDialog(title="GVHMR Import Failed", message=str(exc), button=["OK"], icon="critical")
@@ -223,6 +344,7 @@ def show():
 
     cmds.separator(height=8, style="in")
     cmds.checkBox("gvhmrImportBodyCheck", label="Import FBX/Alembic body", value=True)
+    cmds.checkBox("gvhmrImportSMPCMeshCheck", label="Import SMPC animated mesh cache", value=False)
     cmds.checkBox("gvhmrImportCameraCheck", label="Create animated camera", value=True)
     cmds.checkBox("gvhmrReplaceCameraCheck", label="Replace existing GVHMR camera", value=True)
 
