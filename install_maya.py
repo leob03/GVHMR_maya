@@ -18,6 +18,7 @@ MODULE_NAME = "GVHMR_maya"
 MODULE_VERSION = "1.0"
 SHELF_NAME = "GVHMR"
 SHELF_BUTTON_ANNOTATION = "Open GVHMR Maya Importer"
+SHELF_ICON = "icons/gvhmr_character.xpm"
 
 
 def _repo_dir():
@@ -91,12 +92,13 @@ def _create_shelf_button(repo_dir):
         "importlib.reload(gvhmr_maya_importer)\n"
         "gvhmr_maya_importer.show()\n"
     )
+    icon_path = os.path.join(repo_dir, SHELF_ICON)
 
     cmds.shelfButton(
         parent=shelf,
         label="GVHMR",
         annotation=SHELF_BUTTON_ANNOTATION,
-        image1="commandButton.png",
+        image1=icon_path if os.path.isfile(icon_path) else "kinJoint.png",
         sourceType="python",
         command=command,
     )
