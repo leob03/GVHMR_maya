@@ -267,6 +267,7 @@ def _create_camera(camera_data, replace_existing=True, flip_x=True):
     img_w = int(camera_data.get("img_width", 1920))
     img_h = int(camera_data.get("img_height", 1080))
     fps = float(camera_data.get("fps", 24))
+    sensor_width_mm = float(camera_data.get("sensor_width_mm", 36.0))
     frames = camera_data.get("frames", [])
 
     _set_time_unit(fps)
@@ -275,6 +276,11 @@ def _create_camera(camera_data, replace_existing=True, flip_x=True):
 
     cmds.setAttr("defaultResolution.width", img_w)
     cmds.setAttr("defaultResolution.height", img_h)
+    cmds.setAttr(f"{shape}.horizontalFilmAperture", sensor_width_mm / 25.4)
+    cmds.setAttr(f"{shape}.verticalFilmAperture", (sensor_width_mm * img_h / img_w) / 25.4)
+    cmds.setAttr(f"{shape}.filmFit", 1)  # horizontal
+    cmds.setAttr(f"{shape}.lensSqueezeRatio", 1.0)
+    cmds.setAttr(f"{shape}.cameraScale", 1.0)
 
     for item in frames:
         frame = item["frame"]
