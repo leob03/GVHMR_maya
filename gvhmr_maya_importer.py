@@ -23,6 +23,14 @@ import maya.api.OpenMaya as om
 WINDOW_NAME = "gvhmrMayaImporterWindow"
 
 
+CAMERA_X_FLIP_MATRIX = [
+    1.0, 0.0, 0.0, 0.0,
+    0.0, -1.0, 0.0, 0.0,
+    0.0, 0.0, -1.0, 0.0,
+    0.0, 0.0, 0.0, 1.0,
+]
+
+
 def _manifest_path(bundle_dir):
     return os.path.join(bundle_dir, "manifest.json")
 
@@ -38,6 +46,14 @@ def _resolve_bundle_file(bundle_dir, value):
 def _load_json(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _matmul4(a, b):
+    out = [0.0] * 16
+    for row in range(4):
+        for col in range(4):
+            out[row * 4 + col] = sum(a[row * 4 + k] * b[k * 4 + col] for k in range(4))
+    return out
 
 
 def _read_array(file_obj, typecode, count):
@@ -129,8 +145,20 @@ def _create_mesh_from_frame(mesh_name, vertices, faces, frame_index, num_verts, 
 
     mesh_fn = om.MFnMesh()
     mesh_obj = mesh_fn.create(points, face_counts, face_connects, parent=transform_obj)
+    dag = om.MFnDagNode(mesh_obj)
+    shape_path = dag.fullPathName()
     shape_name = f"{mesh_name}Shape"
-    cmds.rename(om.MFnDagNode(mesh_obj).fullPathName(), shape_name)
+    try:
+        cmds.rename(shape_path, shape_name)
+    except Exception:
+        pass
+    children = cmds.listRelatives(transform_name, shapes=True, fullPath=False) or []
+    for child in children:
+        if child.startswith("polySurface"):
+            try:
+                cmds.rename(child, shape_name)
+            except Exception:
+                pass
     return transform_name
 
 
@@ -225,7 +253,7 @@ def _delete_existing_camera(camera_name):
             pass
 
 
-def _create_camera(camera_data, replace_existing=True):
+def _create_camera(camera_data, replace_existing=True, flip_x=True):
     camera_name = camera_data.get("camera_name", "GVHMR_Camera")
     if replace_existing:
         _delete_existing_camera(camera_name)
@@ -251,6 +279,8 @@ def _create_camera(camera_data, replace_existing=True):
     for item in frames:
         frame = item["frame"]
         matrix = item["matrix"]
+        if flip_x:
+            matrix = _matmul4(matrix, CAMERA_X_FLIP_MATRIX)
         focal = item.get("focal_length_mm")
 
         cmds.currentTime(frame, edit=True)
@@ -267,7 +297,7 @@ def _create_camera(camera_data, replace_existing=True):
     return transform
 
 
-def import_bundle(bundle_dir, import_body=True, import_smpc_mesh=False, import_camera=True, replace_camera=True):
+def import_bundle(bundle_dir, import_body=True, import_smpc_mesh=False, import_camera=True, replace_camera=True, flip_camera_x=True):
     bundle_dir = os.path.abspath(bundle_dir)
     manifest_file = _manifest_path(bundle_dir)
     if not os.path.isfile(manifest_file):
@@ -291,7 +321,7 @@ def import_bundle(bundle_dir, import_body=True, import_smpc_mesh=False, import_c
         if not os.path.isfile(camera_json):
             raise RuntimeError(f"Maya camera JSON not found: {camera_json}")
         camera_data = _load_json(camera_json)
-        camera_name = _create_camera(camera_data, replace_existing=replace_camera)
+        camera_name = _create_camera(camera_data, replace_existing=replace_camera, flip_x=flip_camera_x)
 
     return {
         "bundle_dir": bundle_dir,
@@ -313,6 +343,7 @@ def _run_import(*_):
     import_smpc_mesh_value = cmds.checkBox("gvhmrImportSMPCMeshCheck", query=True, value=True)
     import_camera_value = cmds.checkBox("gvhmrImportCameraCheck", query=True, value=True)
     replace_camera_value = cmds.checkBox("gvhmrReplaceCameraCheck", query=True, value=True)
+    flip_camera_x_value = cmds.checkBox("gvhmrFlipCameraXCheck", query=True, value=True)
 
     try:
         result = import_bundle(
@@ -321,6 +352,7 @@ def _run_import(*_):
             import_smpc_mesh=import_smpc_mesh_value,
             import_camera=import_camera_value,
             replace_camera=replace_camera_value,
+            flip_camera_x=flip_camera_x_value,
         )
         message = "GVHMR import complete"
         if result.get("camera"):
@@ -356,6 +388,7 @@ def show():
     cmds.checkBox("gvhmrImportSMPCMeshCheck", label="Import SMPC animated mesh cache", value=False)
     cmds.checkBox("gvhmrImportCameraCheck", label="Create animated camera", value=True)
     cmds.checkBox("gvhmrReplaceCameraCheck", label="Replace existing GVHMR camera", value=True)
+    cmds.checkBox("gvhmrFlipCameraXCheck", label="Flip camera 180 degrees around X", value=True)
 
     cmds.separator(height=8, style="in")
     cmds.button(label="Import GVHMR Bundle", height=34, command=_run_import)
