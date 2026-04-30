@@ -409,53 +409,7 @@ def _delete_existing_camera(camera_name):
             pass
 
 
-def _reference_media_path(bundle_dir, files):
-    value = files.get("reference_video", "") or files.get("reference_image", "")
-    if value:
-        path = _resolve_bundle_file(bundle_dir, value)
-        if os.path.isfile(path):
-            return path
-
-    smpc_path = _resolve_bundle_file(bundle_dir, files.get("smpc_bin", ""))
-    if smpc_path:
-        base, _ = os.path.splitext(smpc_path)
-        for ext in (".mp4", ".mov", ".png", ".jpg", ".jpeg"):
-            candidate = f"{base}_ref{ext}"
-            if os.path.isfile(candidate):
-                return candidate
-    return ""
-
-
-def _create_camera_reference_plane(camera_transform, camera_shape, media_path):
-    if not media_path:
-        return ""
-
-    try:
-        result = cmds.imagePlane(camera=camera_transform, fileName=media_path)
-    except Exception as exc:
-        cmds.warning(f"Could not create camera image plane from {media_path}: {exc}")
-        return ""
-
-    plane_shape = ""
-    if isinstance(result, (list, tuple)) and result:
-        plane_shape = result[-1]
-    elif isinstance(result, str):
-        plane_shape = result
-
-    _safe_set_attr(f"{camera_shape}.displayResolution", 1)
-    _safe_set_attr(f"{camera_shape}.displayFilmGate", 1)
-    _safe_set_attr(f"{camera_shape}.displayGateMask", 1)
-    _safe_set_attr(f"{camera_shape}.displayGateMaskOpacity", 0.5)
-    _safe_set_attr(f"{camera_shape}.overscan", 1.0)
-
-    if plane_shape:
-        _safe_set_attr(f"{plane_shape}.displayMode", 3)
-        _safe_set_attr(f"{plane_shape}.alphaGain", 0.7)
-
-    return plane_shape
-
-
-def _create_camera(camera_data, replace_existing=True, flip_x=True, reference_media_path=""):
+def _create_camera(camera_data, replace_existing=True):
     camera_name = camera_data.get("camera_name", "GVHMR_Camera")
     if replace_existing:
         _delete_existing_camera(camera_name)
@@ -478,6 +432,8 @@ def _create_camera(camera_data, replace_existing=True, flip_x=True, reference_me
 
     cmds.setAttr("defaultResolution.width", img_w)
     cmds.setAttr("defaultResolution.height", img_h)
+    cmds.setAttr("defaultResolution.pixelAspect", 1.0)
+    cmds.setAttr("defaultResolution.deviceAspectRatio", float(img_w) / float(img_h or 1))
     cmds.setAttr(f"{shape}.horizontalFilmAperture", sensor_width_mm / 25.4)
     cmds.setAttr(f"{shape}.verticalFilmAperture", (sensor_width_mm * img_h / img_w) / 25.4)
     cmds.setAttr(f"{shape}.filmFit", 1)  # horizontal
@@ -490,11 +446,9 @@ def _create_camera(camera_data, replace_existing=True, flip_x=True, reference_me
 
     for item in frames:
         frame = item["frame"]
-        matrix = item["matrix"]
-        if flip_x:
-            # Pre-multiply for Maya's row-major transform list so the camera
-            # orientation flips while the world-space translation stays put.
-            matrix = _matmul4(CAMERA_X_FLIP_MATRIX, matrix)
+        # Pre-multiply for Maya's row-major transform list so the camera
+        # orientation flips while the world-space translation stays put.
+        matrix = _matmul4(CAMERA_X_FLIP_MATRIX, item["matrix"])
         focal = item.get("focal_length_mm")
 
         cmds.currentTime(frame, edit=True)
@@ -508,16 +462,13 @@ def _create_camera(camera_data, replace_existing=True, flip_x=True, reference_me
     if frames:
         cmds.currentTime(frames[0]["frame"], edit=True)
 
-    if reference_media_path:
-        _create_camera_reference_plane(transform, shape, reference_media_path)
-
     return transform
 
 
 def import_bundle(
     bundle_dir,
     import_smplx_rig=True,
-    import_body=True,
+    import_body=False,
     import_smpc_mesh=False,
     import_camera=True,
     replace_camera=True,
@@ -552,12 +503,9 @@ def import_bundle(
         if not os.path.isfile(camera_json):
             raise RuntimeError(f"Maya camera JSON not found: {camera_json}")
         camera_data = _load_json(camera_json)
-        reference_media = _reference_media_path(bundle_dir, files) if create_reference_plane else ""
         camera_name = _create_camera(
             camera_data,
             replace_existing=replace_camera,
-            flip_x=flip_camera_x,
-            reference_media_path=reference_media,
         )
 
     if xray_joints:
@@ -581,24 +529,19 @@ def _choose_bundle(*_):
 def _run_import(*_):
     bundle_dir = cmds.textFieldButtonGrp("gvhmrBundleField", query=True, text=True)
     import_smplx_rig_value = cmds.checkBox("gvhmrImportSMPLXRigCheck", query=True, value=True)
-    import_body_value = cmds.checkBox("gvhmrImportBodyCheck", query=True, value=True)
     import_smpc_mesh_value = cmds.checkBox("gvhmrImportSMPCMeshCheck", query=True, value=True)
     import_camera_value = cmds.checkBox("gvhmrImportCameraCheck", query=True, value=True)
     replace_camera_value = cmds.checkBox("gvhmrReplaceCameraCheck", query=True, value=True)
-    flip_camera_x_value = cmds.checkBox("gvhmrFlipCameraXCheck", query=True, value=True)
-    create_reference_plane_value = cmds.checkBox("gvhmrReferencePlaneCheck", query=True, value=True)
     xray_joints_value = cmds.checkBox("gvhmrXrayJointsCheck", query=True, value=True)
 
     try:
         result = import_bundle(
             bundle_dir,
             import_smplx_rig=import_smplx_rig_value,
-            import_body=import_body_value,
+            import_body=False,
             import_smpc_mesh=import_smpc_mesh_value,
             import_camera=import_camera_value,
             replace_camera=replace_camera_value,
-            flip_camera_x=flip_camera_x_value,
-            create_reference_plane=create_reference_plane_value,
             xray_joints=xray_joints_value,
         )
         message = "GVHMR import complete"
@@ -634,12 +577,9 @@ def show():
 
     cmds.separator(height=8, style="in")
     cmds.checkBox("gvhmrImportSMPLXRigCheck", label="Import SMPLX skeletal rig", value=True)
-    cmds.checkBox("gvhmrImportBodyCheck", label="Import FBX/Alembic body", value=True)
     cmds.checkBox("gvhmrImportSMPCMeshCheck", label="Import SMPC animated mesh cache", value=False)
     cmds.checkBox("gvhmrImportCameraCheck", label="Create animated camera", value=True)
     cmds.checkBox("gvhmrReplaceCameraCheck", label="Replace existing GVHMR camera", value=True)
-    cmds.checkBox("gvhmrFlipCameraXCheck", label="Flip camera 180 degrees around X", value=True)
-    cmds.checkBox("gvhmrReferencePlaneCheck", label="Attach reference video/image plane", value=False)
     cmds.checkBox("gvhmrXrayJointsCheck", label="Show joints through mesh", value=True)
 
     cmds.separator(height=8, style="in")
