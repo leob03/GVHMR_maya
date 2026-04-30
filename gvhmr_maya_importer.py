@@ -111,6 +111,9 @@ def _convert_smpc_point(x, y, z):
 
 
 def _create_mesh_from_frame(mesh_name, vertices, faces, frame_index, num_verts, num_faces):
+    if cmds.objExists(mesh_name):
+        cmds.delete(mesh_name)
+
     offset = frame_index * num_verts * 3
     points = [
         _convert_smpc_point(vertices[offset + i * 3], vertices[offset + i * 3 + 1], vertices[offset + i * 3 + 2])
@@ -118,11 +121,17 @@ def _create_mesh_from_frame(mesh_name, vertices, faces, frame_index, num_verts, 
     ]
     face_counts = [3] * num_faces
     face_connects = [int(v) for v in faces]
+
+    transform_name = cmds.createNode("transform", name=mesh_name)
+    selection = om.MSelectionList()
+    selection.add(transform_name)
+    transform_obj = selection.getDependNode(0)
+
     mesh_fn = om.MFnMesh()
-    mesh_obj = mesh_fn.create(points, face_counts, face_connects)
-    transform = om.MFnDagNode(mesh_obj).parent(0)
-    transform_name = om.MFnDagNode(transform).fullPathName()
-    return cmds.rename(transform_name, mesh_name)
+    mesh_obj = mesh_fn.create(points, face_counts, face_connects, parent=transform_obj)
+    shape_name = f"{mesh_name}Shape"
+    cmds.rename(om.MFnDagNode(mesh_obj).fullPathName(), shape_name)
+    return transform_name
 
 
 def _load_smpc_mesh_data(path):
