@@ -170,6 +170,144 @@ def _create_mesh_from_frame(mesh_name, vertices, faces, frame_index, num_verts, 
     return transform_name
 
 
+def _create_mesh_from_positions(mesh_name, positions, faces):
+    if cmds.objExists(mesh_name):
+        cmds.delete(mesh_name)
+
+    points = [_convert_smpc_point(point[0], point[1], point[2]) for point in positions]
+    face_counts = [3] * len(faces)
+    face_connects = [int(v) for face in faces for v in face]
+
+    transform_name = cmds.createNode("transform", name=mesh_name)
+    selection = om.MSelectionList()
+    selection.add(transform_name)
+    transform_obj = selection.getDependNode(0)
+
+    mesh_fn = om.MFnMesh()
+    mesh_obj = mesh_fn.create(points, face_counts, face_connects, parent=transform_obj)
+    dag = om.MFnDagNode(mesh_obj)
+    shape_path = dag.fullPathName()
+    try:
+        cmds.rename(shape_path, f"{mesh_name}Shape")
+    except Exception:
+        pass
+    return transform_name
+
+
+def _delete_existing_smplx_rig():
+    for name in ("GVHMR_SMPLX", "GVHMR_SMPLX_Mesh", "GVHMR_SMPLX_Skeleton"):
+        if cmds.objExists(name):
+            try:
+                cmds.delete(name)
+            except Exception:
+                pass
+
+
+def _import_smplx_rig(bundle_dir, files, replace_existing=True):
+    rig_path = _resolve_bundle_file(bundle_dir, files.get("maya_smplx_rig_json", ""))
+    if not rig_path or not os.path.isfile(rig_path):
+        cmds.warning("No Maya SMPLX skeletal rig payload found in bundle.")
+        return ""
+
+    data = _load_json(rig_path)
+    joint_names = data["joint_names"]
+    joint_parents = [int(value) for value in data["joint_parents"]]
+    joint_positions = data["joint_positions"]
+    mesh_positions = data["mesh_positions"]
+    faces = data["faces"]
+    skin_indices = data["skin_indices"]
+    skin_weights = data["skin_weights"]
+    animation = data.get("animation", {})
+    root_translations = animation.get("root_translations", [])
+    joint_eulers = animation.get("joint_eulers_xyz_deg", [])
+    fps = float(data.get("fps", 24))
+
+    if replace_existing:
+        _delete_existing_smplx_rig()
+
+    group = cmds.group(empty=True, name="GVHMR_SMPLX")
+    skeleton_group = cmds.group(empty=True, name="GVHMR_SMPLX_Skeleton", parent=group)
+
+    joints = []
+    for name in joint_names:
+        joint = cmds.createNode("joint", name=f"GVHMR_{name}_JNT")
+        cmds.setAttr(f"{joint}.rotateOrder", 0)
+        joints.append(joint)
+
+    for index, joint in enumerate(joints):
+        parent_index = joint_parents[index]
+        if parent_index >= 0:
+            cmds.parent(joint, joints[parent_index])
+            offset = [
+                float(joint_positions[index][axis]) - float(joint_positions[parent_index][axis])
+                for axis in range(3)
+            ]
+        else:
+            cmds.parent(joint, skeleton_group)
+            offset = [float(value) for value in joint_positions[index]]
+
+        cmds.setAttr(f"{joint}.translate", offset[0], offset[1], offset[2], type="double3")
+        cmds.setAttr(f"{joint}.rotate", 0.0, 0.0, 0.0, type="double3")
+        cmds.setAttr(f"{joint}.jointOrient", 0.0, 0.0, 0.0, type="double3")
+
+    mesh = _create_mesh_from_positions("GVHMR_SMPLX_Mesh", mesh_positions, faces)
+    cmds.parent(mesh, group)
+
+    skin_cluster = cmds.skinCluster(
+        joints,
+        mesh,
+        toSelectedBones=True,
+        bindMethod=0,
+        skinMethod=0,
+        normalizeWeights=1,
+        maximumInfluences=4,
+        name="GVHMR_SMPLX_SkinCluster",
+    )[0]
+
+    for vertex_index, (indices, weights) in enumerate(zip(skin_indices, skin_weights)):
+        transform_values = []
+        for joint_index, weight in zip(indices, weights):
+            weight = float(weight)
+            if weight > 1e-6:
+                transform_values.append((joints[int(joint_index)], weight))
+        if transform_values:
+            cmds.skinPercent(
+                skin_cluster,
+                f"{mesh}.vtx[{vertex_index}]",
+                transformValue=transform_values,
+                normalize=True,
+            )
+
+    _set_time_unit(fps)
+    frame_count = min(len(root_translations), len(joint_eulers))
+    if frame_count:
+        cmds.playbackOptions(min=1, max=frame_count)
+
+    for frame_index in range(frame_count):
+        frame = frame_index + 1
+        cmds.currentTime(frame, edit=True)
+        root_translation = root_translations[frame_index]
+        cmds.setAttr(
+            f"{joints[0]}.translate",
+            float(root_translation[0]),
+            float(root_translation[1]),
+            float(root_translation[2]),
+            type="double3",
+        )
+        cmds.setKeyframe(joints[0], attribute=["translate"], time=frame)
+
+        for joint_index, joint in enumerate(joints):
+            rx, ry, rz = joint_eulers[frame_index][joint_index]
+            cmds.setAttr(f"{joint}.rotate", float(rx), float(ry), float(rz), type="double3")
+            cmds.setKeyframe(joint, attribute=["rotate"], time=frame)
+
+    if frame_count:
+        cmds.currentTime(1, edit=True)
+
+    cmds.select(group, replace=True)
+    return group
+
+
 def _load_smpc_mesh_data(path):
     with open(path, "rb") as f:
         magic = f.read(4)
@@ -368,6 +506,7 @@ def _create_camera(camera_data, replace_existing=True, flip_x=True, reference_me
 
 def import_bundle(
     bundle_dir,
+    import_smplx_rig=True,
     import_body=True,
     import_smpc_mesh=False,
     import_camera=True,
@@ -383,9 +522,13 @@ def import_bundle(
     manifest = _load_json(manifest_file)
     files = manifest.get("files", {})
 
+    imported_rig = ""
     imported_body = ""
     imported_mesh = ""
     camera_name = ""
+
+    if import_smplx_rig:
+        imported_rig = _import_smplx_rig(bundle_dir, files, replace_existing=True)
 
     if import_body:
         imported_body = _import_body(bundle_dir, files)
@@ -408,6 +551,7 @@ def import_bundle(
 
     return {
         "bundle_dir": bundle_dir,
+        "rig": imported_rig,
         "body_path": imported_body,
         "mesh": imported_mesh,
         "camera": camera_name,
@@ -422,6 +566,7 @@ def _choose_bundle(*_):
 
 def _run_import(*_):
     bundle_dir = cmds.textFieldButtonGrp("gvhmrBundleField", query=True, text=True)
+    import_smplx_rig_value = cmds.checkBox("gvhmrImportSMPLXRigCheck", query=True, value=True)
     import_body_value = cmds.checkBox("gvhmrImportBodyCheck", query=True, value=True)
     import_smpc_mesh_value = cmds.checkBox("gvhmrImportSMPCMeshCheck", query=True, value=True)
     import_camera_value = cmds.checkBox("gvhmrImportCameraCheck", query=True, value=True)
@@ -432,6 +577,7 @@ def _run_import(*_):
     try:
         result = import_bundle(
             bundle_dir,
+            import_smplx_rig=import_smplx_rig_value,
             import_body=import_body_value,
             import_smpc_mesh=import_smpc_mesh_value,
             import_camera=import_camera_value,
@@ -440,6 +586,8 @@ def _run_import(*_):
             create_reference_plane=create_reference_plane_value,
         )
         message = "GVHMR import complete"
+        if result.get("rig"):
+            message += f"\nSMPLX Rig: {result['rig']}"
         if result.get("camera"):
             message += f"\nCamera: {result['camera']}"
         if result.get("body_path"):
@@ -469,6 +617,7 @@ def show():
     )
 
     cmds.separator(height=8, style="in")
+    cmds.checkBox("gvhmrImportSMPLXRigCheck", label="Import SMPLX skeletal rig", value=True)
     cmds.checkBox("gvhmrImportBodyCheck", label="Import FBX/Alembic body", value=True)
     cmds.checkBox("gvhmrImportSMPCMeshCheck", label="Import SMPC animated mesh cache", value=False)
     cmds.checkBox("gvhmrImportCameraCheck", label="Create animated camera", value=True)
