@@ -204,6 +204,14 @@ def _delete_existing_smplx_rig():
                 pass
 
 
+def _set_xray_joints_enabled(enabled=True):
+    for panel in cmds.getPanel(type="modelPanel") or []:
+        try:
+            cmds.modelEditor(panel, edit=True, jointXray=enabled)
+        except Exception:
+            pass
+
+
 def _import_smplx_rig(bundle_dir, files, replace_existing=True):
     rig_path = _resolve_bundle_file(bundle_dir, files.get("maya_smplx_rig_json", ""))
     if not rig_path or not os.path.isfile(rig_path):
@@ -515,6 +523,7 @@ def import_bundle(
     replace_camera=True,
     flip_camera_x=True,
     create_reference_plane=False,
+    xray_joints=True,
 ):
     bundle_dir = os.path.abspath(bundle_dir)
     manifest_file = _manifest_path(bundle_dir)
@@ -551,6 +560,9 @@ def import_bundle(
             reference_media_path=reference_media,
         )
 
+    if xray_joints:
+        _set_xray_joints_enabled(True)
+
     return {
         "bundle_dir": bundle_dir,
         "rig": imported_rig,
@@ -575,6 +587,7 @@ def _run_import(*_):
     replace_camera_value = cmds.checkBox("gvhmrReplaceCameraCheck", query=True, value=True)
     flip_camera_x_value = cmds.checkBox("gvhmrFlipCameraXCheck", query=True, value=True)
     create_reference_plane_value = cmds.checkBox("gvhmrReferencePlaneCheck", query=True, value=True)
+    xray_joints_value = cmds.checkBox("gvhmrXrayJointsCheck", query=True, value=True)
 
     try:
         result = import_bundle(
@@ -586,6 +599,7 @@ def _run_import(*_):
             replace_camera=replace_camera_value,
             flip_camera_x=flip_camera_x_value,
             create_reference_plane=create_reference_plane_value,
+            xray_joints=xray_joints_value,
         )
         message = "GVHMR import complete"
         if result.get("rig"):
@@ -626,6 +640,7 @@ def show():
     cmds.checkBox("gvhmrReplaceCameraCheck", label="Replace existing GVHMR camera", value=True)
     cmds.checkBox("gvhmrFlipCameraXCheck", label="Flip camera 180 degrees around X", value=True)
     cmds.checkBox("gvhmrReferencePlaneCheck", label="Attach reference video/image plane", value=False)
+    cmds.checkBox("gvhmrXrayJointsCheck", label="Show joints through mesh", value=True)
 
     cmds.separator(height=8, style="in")
     cmds.button(label="Import GVHMR Bundle", height=34, command=_run_import)
