@@ -373,7 +373,7 @@ def import_bundle(
     import_camera=True,
     replace_camera=True,
     flip_camera_x=True,
-    create_reference_plane=True,
+    create_reference_plane=False,
 ):
     bundle_dir = os.path.abspath(bundle_dir)
     manifest_file = _manifest_path(bundle_dir)
@@ -474,7 +474,7 @@ def show():
     cmds.checkBox("gvhmrImportCameraCheck", label="Create animated camera", value=True)
     cmds.checkBox("gvhmrReplaceCameraCheck", label="Replace existing GVHMR camera", value=True)
     cmds.checkBox("gvhmrFlipCameraXCheck", label="Flip camera 180 degrees around X", value=True)
-    cmds.checkBox("gvhmrReferencePlaneCheck", label="Attach reference video/image plane", value=True)
+    cmds.checkBox("gvhmrReferencePlaneCheck", label="Attach reference video/image plane", value=False)
 
     cmds.separator(height=8, style="in")
     cmds.button(label="Import GVHMR Bundle", height=34, command=_run_import)
